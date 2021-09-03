@@ -1,0 +1,419 @@
+---
+title: "All positive cases April 01 onwards - Hospitalisation and Mortality Risks ADULTS"
+author: "Chris Robertson"
+date: "17/08/2021"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+
+#Libraries
+library(plyr)
+library(tidyverse)
+library(survival)
+#Load data
+
+Location <- "/conf/"  # Server
+#Location <- "//isdsf00d03/"  # Desktop
+
+z.df <- readRDS(paste0(Location,"EAVE/GPanalysis/outputs/temp/CR_Sgene_all_positive.rds"))
+a_begin <- as.Date("2021-04-01")
+z.df <- z.df %>%  filter(flag_incon == 0) # remove inconsistent vaccination records - need to correct this
+z.df <- z.df %>%  filter(age_year >= 18) # remove inconsistent vaccination records - need to correct this
+
+
+fun.extract <- function(z.fit) {
+  #takes a coxph filt using penalised splines and drops off the ps terms
+  #make sure no variable begins ps
+  z <- summary(z.fit)
+  z <- data.frame(z$conf.int)
+  z <- z %>% mutate(names = row.names(z)) %>% 
+   filter(!(grepl("^ps", names))) %>% 
+   dplyr::relocate(names, .before=1) %>% 
+   dplyr::select(-exp..coef.)
+  names(z) <- c("names","HR","LCL","UCL")
+ z
+}
+
+fun_print_hr <- function(z,z_var){
+ # z_var <- "vsv2_14+"
+  z1 <- filter(z,names==z_var)
+  z1[c("HR","LCL","UCL")] <- round(z1[c("HR","LCL","UCL")], 2)
+  str_c(z1["HR"], ", 95% CI (", z1["LCL"], ", ", z1["UCL"],")")
+}
+#fun_print_hr(z, "vsv2_14+")
+```
+
+## Introduction
+
+The data analysed in this report are based upon all patients who tested positive in Scotland form April 01, 2021 onwards.  The first positive test within this period is used and positive individuals can have tested positive prior to this date.
+
+A covid admission to hospital is taken to be individuals who have a positive covid test within 14 days of admission or who tested positive within 2 days of admission.  Also included are patients who were already in hospital and then tested positive, more than 2 days post admission.  The latter group are not included in the analysis of the risk of hospital admission from the community with covid as they are already in hospital. 
+
+The analysis of the s gene drop out data uses lighthouse samples only and the drop out corresponds to negative on the s gene and Ct values <30 for at least one of the OR and N genes. S positive corresponds to Ct values < 30 on the S gene.  A weak positive is negative for S and Ct >= 30 for both OR and N genes;  all other samples are labelled S Gene positive
+
+Counts of the individuals testing positive are presented from April 01, 2021.
+
+The testing data are linked to the EAVE study data of GP clincial conditions.
+
+Hospital admission is derived from the RAPID database only.  This database records admissions to hospital and for many patients there are repeat admissions within a short space of time, sometimes with missing discharge dates.  The rule for combining repeat admission episodes into putative continuous inpatient stays is the same as for the hospital acquired covid infection report.  Episodes where the discharge date on one is the same or the day before the admission date of the following episode are combined; if the discahrge date is missing and a subsequent admission is within 2 days of the previous one the episodes are combined; if the discharge date is missing and there is a subsequent admission 3 or more days in the future then the discahrge date is set to 2 days after admission.
+
+Vaccination status is defined at the date the of the positive PCR test.  It is coded as unvaccinated (uv), one dose and tested positive within 27 days (v1_0_27), one dose and 28+ days (v1_28+) with 2 dose groups - 0-13 days post second dose (v2_0_13) and 14+ days post second dose (v2_14+).
+
+Cox proportional hazard models are used to estimate the risk of hospitalisation and covid death following a positive covid test result.  
+
+
+## Basic Tables
+
+The table gives the number of individuals in each S gene group.  The S-Gene dropout is based upon Lighthouse samples only.  Unknown corresponds to individuals who are tested in the NHS labs attached to the hospitals.  Many of these individuals are admitted directly to hospital.
+
+```{r table_1, echo=FALSE, warning=FALSE, message = FALSE}
+z_tab <- z.df %>% group_by(s_gene, lab, In_Hosp_At_Test) %>% dplyr::summarise(N=n())
+kableExtra::kbl(z_tab, 
+        caption = "Numbers Testing Positive for Covid 19  by S Gene status, testing laboratory and hospital status at the time of test",
+        col.names=c("S Gene","Laboratory", "In Hospital at Test", "Number")) %>%
+    kableExtra::kable_classic(full_width = F, html_font = "Cambria", position = "left")
+```
+
+
+```{r graph_1, echo=FALSE, warning=FALSE, message = FALSE}
+z <- z.df %>% filter(hosp_covid_emerg==1 & In_Hosp_At_Test == 0) %>% 
+  group_by(admission_date) %>% 
+  dplyr::summarise(N=n()) %>% 
+  filter(admission_date > a_begin + 7)
+
+z %>%  ggplot(aes(x=admission_date, y=N)) + geom_point() +
+  labs(x="Admission Date",y ="Number", title="Emergency Hospital Admissions for Covid")
+```
+
+```{r graph_2, echo=FALSE, warning=FALSE, message = FALSE}
+z <- z.df %>% 
+  group_by(specimen_date, s_gene) %>% 
+  dplyr::summarise(N=n()) 
+
+z %>%  ggplot(aes(x=specimen_date, y=N, colour=s_gene)) + geom_point() +
+  labs(x="Specimen Date",y ="Number", title="Number of cases per day", colour="S Gene") + scale_y_log10()
+```
+
+
+##Time to Hospitalisation
+
+###Admission from Community Testing - Lighthouse tested
+
+```{r analysis_0, echo=FALSE, warning=FALSE, message = FALSE}
+
+z.rv <- "hosp_covid_emerg" 
+z.rv.time <- "Time.To.Hosp" 
+fmla.plot <- as.formula(paste("Surv(",z.rv.time,",",z.rv,") ~  s_gene "))
+z.tab <- pyears(fmla.plot, data=z.df, subset= lab=="lh" & in_eave==1 & In_Hosp_At_Test==0, data.frame=TRUE)$data
+kableExtra::kbl(z.tab, 
+        caption = "Numbers and person years for Emergency Admission from Community",
+        digits=c(0,1,0,0)) %>%
+ # kableExtra::column_spec(1, width="15em") %>% 
+    kableExtra::kable_classic(full_width = F, html_font = "Cambria", position = "left")
+
+```
+
+```{r analysis_1, echo=FALSE, warning=FALSE, message = FALSE}
+
+z.rv <- "hosp_covid_emerg" 
+z.rv.time <- "Time.To.Hosp" 
+fmla.plot <- as.formula(paste("Surv(",z.rv.time,",",z.rv,") ~  s_gene "))
+z.survfit <- survfit(fmla.plot, data=z.df, subset= lab=="lh" & in_eave==1 & In_Hosp_At_Test==0)
+plot(z.survfit, fun="event", col=1:4, xlab="Days from Test to Hospital Admission",
+     ylab="Risk")
+legend("topleft",col=1:4, lty=1, legend=levels(z.df$s_gene))
+
+```
+
+
+```{r analysis_2, echo=FALSE, warning=FALSE, message = FALSE}
+
+fmla.final <- as.formula(paste("Surv(",z.rv.time,",",z.rv,") ~   pspline(age_year) +pspline(days) + sex + simd2020_sc_quintile +
+                               s_gene +  n_risk_gps +vs "))
+z.fit <- coxph(fmla.final , data=z.df, subset = In_Hosp_At_Test==0 & lab=="lh" & in_eave==1)
+drop1(z.fit, test="Chisq")
+
+```
+
+```{r analysis_2_table, echo=FALSE, warning=FALSE, message = FALSE}
+z <- fun.extract(z.fit)
+kableExtra::kbl(z, 
+        caption = "Hazard Ratios for Emergency Admission from Community",
+        digits=c(0,2,2,2)) %>%
+  kableExtra::column_spec(1, width="15em") %>% 
+    kableExtra::kable_classic(full_width = F, html_font = "Cambria", position = "left")
+
+```
+
+The above table shows the S+ cases in the community are about 80% more likely to be admitted to hospital than S- cases, hazard ratio is `r fun_print_hr(z, "s_geneS_Pos")`.  Vaccinated individuals, particularly at least 28 days after the first dose, are less likely to be admitted, even though they test positive.
+
+```{r analysis_3_table, echo=FALSE, warning=FALSE, message = FALSE}
+fmla.final <- as.formula(paste("Surv(",z.rv.time,",",z.rv,") ~   pspline(age_year) + pspline(days) + sex + simd2020_sc_quintile +
+             n_risk_gps + s_gene +  s_gene:vt  "))
+z.df.fit <- z.df %>% filter(In_Hosp_At_Test==0 & lab=="lh" & in_eave==1) %>% 
+  filter(s_gene != "Unknown") %>% 
+  mutate(s_gene = factor(s_gene)) %>% 
+  filter(!(vt %in% c("Mo_v1_0:27" , "Mo_v1_28+v2", "UNK_v1_28+v2"))) %>% mutate(vt = fct_drop(vt))
+z.fit <- coxph(fmla.final , data=z.df.fit )
+
+z <- fun.extract(z.fit)
+kableExtra::kbl(z, 
+        caption = "Hazard Ratios for Emergency Admission from Community - Vaccine Type",
+        digits=c(0,2,2,2)) %>%
+     kableExtra::column_spec(1, width="15em") %>% 
+ kableExtra::kable_classic(full_width = F, html_font = "Cambria", position = "left")
+
+```
+
+The above table shows that unvaccinated S+ cases in the community are about 80% more likely to be admitted to hospital than unvaccinated S- cases , hazard ratio is `r fun_print_hr(z, "s_geneS_Pos")`.  Vaccinated individuals at least 28 days after the first dose, are less likely to be admitted, even though they test positive.  The hazard ratios for Pfizer for S+ (`r fun_print_hr(z, "s_geneS_Pos.vtPB_v1_28.v2")` ) is a bit lower than for AZ (`r fun_print_hr(z, "s_geneS_Pos.vtAZ_v1_28.v2")`) though the confidence intervals overlap with almost identical estimates for S- (`r fun_print_hr(z, "s_geneS_Neg.vtPB_v1_28.v2")` and `r fun_print_hr(z, "s_geneS_Neg.vtAZ_v1_28.v2")`), respectively.
+
+
+###Tested in NHS Lab
+
+```{r analysis_4_table, echo=FALSE, warning=FALSE, message = FALSE}
+
+fmla.final <- as.formula(paste("Surv(",z.rv.time,",",z.rv,") ~   pspline(age_year) +pspline(days) + sex + simd2020_sc_quintile +  n_risk_gps +vs "))
+z.fit <- coxph(fmla.final , data=z.df, subset = In_Hosp_At_Test==0 & lab=="nhs" & in_eave==1)
+#drop1(z.fit, test="Chisq")
+
+z <- fun.extract(z.fit)
+kableExtra::kbl(z, 
+        caption = "Hazard Ratios for Emergency Admission Tested in NHS Lab",
+        digits=c(0,2,2,2)) %>%
+    kableExtra::kable_classic(full_width = F, html_font = "Cambria", position = "left")
+
+```
+
+Among individual tested in hospital labs vaccination is still associated with a reduced hazard of admission.  For 2 doses and 14+ days the hazard ratio is `r fun_print_hr(z, "vsv2_14+")` which is higher than the corresponding figure for community tested individuals, see previous table.
+
+###Tested in NHS Lab and in hospital at the time of test
+
+```{r table_5, echo=FALSE, warning=FALSE, message = FALSE}
+
+z.df.fit <- z.df %>% filter(In_Hosp_At_Test==1 & lab=="nhs" & in_eave==1)
+
+z <- z.df.fit %>% group_by(age_gp) %>% dplyr::summarise(N=n())
+kableExtra::kbl(z, 
+        caption = "In hospital at time of test") %>%
+    kableExtra::kable_classic(full_width = F, html_font = "Cambria", position = "left")
+
+z <- z.df.fit %>% group_by(n_risk_gps) %>% dplyr::summarise(N=n())
+kableExtra::kbl(z, 
+        caption = "In hospital at time of test") %>%
+    kableExtra::kable_classic(full_width = F, html_font = "Cambria", position = "left")
+
+z <- z.df.fit %>% group_by(vs) %>% dplyr::summarise(N=n())
+kableExtra::kbl(z, 
+        caption = "In hospital at time of test") %>%
+    kableExtra::kable_classic(full_width = F, html_font = "Cambria", position = "left")
+
+```
+
+The above tables just describe the cases who test positive after admission - not all will be hospital acquired as the test is 3+ days post admission.  The majority are over 75, have multiple co morbidities and are largely fully vaccinated.
+
+
+##Time to Covid Death
+
+###Community Testing
+
+```{r analysis_2_death, echo=FALSE, warning=FALSE, message = FALSE}
+z.rv <- "covid_death" 
+z.rv.time <- "Time.To.Death" 
+z.df.fit <- z.df %>% filter(In_Hosp_At_Test==0 & lab=="lh" & in_eave==1 & s_gene %in% c("S_Neg","S_Pos"))
+z.df.fit$s_gene <- fct_drop(z.df.fit$s_gene)
+
+z <- z.df.fit %>% group_by(vs) %>% dplyr::summarise(N=n(), Died=sum(covid_death))
+kableExtra::kbl(z, 
+        caption = "Community Testing") %>%
+    kableExtra::kable_classic(full_width = F, html_font = "Cambria", position = "left")
+
+
+
+fmla.final <- as.formula(paste("Surv(",z.rv.time,",",z.rv,") ~   pspline(age_year) + sex + simd2020_sc_quintile +
+                               factor(s_gene) + n_risk_gps +vs "))
+z.fit <- coxph(fmla.final , data=z.df.fit)
+drop1(z.fit, test="Chisq")
+
+```
+
+There are few deaths from those tested positive in the community.  Vaccination is associated with a reduced risk of death among those testing positive.
+
+```{r analysis_2_death_table, echo=FALSE, warning=FALSE, message = FALSE}
+z <- fun.extract(z.fit)
+kableExtra::kbl(z, 
+        caption = "Hazard Ratios for Death from Community Testing",
+        digits=c(0,2,2,2)) %>%
+     kableExtra::column_spec(1, width="15em") %>%
+  kableExtra::kable_classic(full_width = F, html_font = "Cambria", position = "left")
+
+```
+
+Vaccination is associated with a reduced risk of death. Fully vaccinated with 2 doses 14+ days post second dose has a hazard ratio of `r fun_print_hr(z, "vsv2_14+")`.
+
+```{r analysis_3_death_table, echo=FALSE, warning=FALSE, message = FALSE}
+fmla.final <- as.formula(paste("Surv(",z.rv.time,",",z.rv,") ~   pspline(age_year)  + sex  + simd2020_sc_quintile +
+                               s_gene +  n_risk_gps + s_gene:vacc "))
+z.fit <- coxph(fmla.final , data=z.df.fit)
+z <- fun.extract(z.fit)
+kableExtra::kbl(z, 
+        caption = "Hazard Ratios for Death from Community Testing by S Gene Status",
+        digits=c(0,2,2,2)) %>%
+     kableExtra::column_spec(1, width="15em") %>%
+  kableExtra::kable_classic(full_width = F, html_font = "Cambria", position = "left")
+
+```
+
+Vaccinated with 1 dose 28+ days post injection or with 2 doses  has a hazard ratio of `r fun_print_hr(z, "s_geneS_Neg:vaccv1_28+v2")` for S Negative and `r fun_print_hr(z, "s_geneS_Pos:vaccv1_28+v2")` for S Positive.
+
+###Community Testing - Sequence
+
+```{r analysis_3_death_table_sq1, echo=FALSE, warning=FALSE, message = FALSE}
+
+z.df.fit <- z.df %>% filter(In_Hosp_At_Test==0 & lab=="lh" & in_eave==1 )
+z <- table(z.df.fit$s_gene, z.df.fit$variant)
+kableExtra::kbl(z, 
+        caption = "Community Testing by S Gene Status and Variant") %>% 
+     kableExtra::column_spec(1, width="15em") %>%
+  kableExtra::kable_classic(full_width = F, html_font = "Cambria", position = "left")
+
+```
+
+Among those community samples sequenced the majority are delta and among those not sequenced the majority are S Positive.  There is a strong association between delta variant and S Positive.
+
+
+```{r analysis_3_death_table_sq2, echo=FALSE, warning=FALSE, message = FALSE}
+
+z.df.fit <- z.df %>%  filter(In_Hosp_At_Test==0 & lab=="lh" & in_eave==1 & variant %in% c("alpha","delta"))
+
+fmla.final <- as.formula(paste("Surv(",z.rv.time,",",z.rv,") ~   pspline(age_year)  + sex  + simd2020_sc_quintile +
+                               variant +  n_risk_gps +vs "))
+z.fit <- coxph(fmla.final , data=z.df.fit)
+z <- fun.extract(z.fit)
+kableExtra::kbl(z, 
+        caption = "Hazard Ratios for Death from Community Testing by Variant among those sequenced",
+        digits=c(0,2,2,2)) %>%
+     kableExtra::column_spec(1, width="15em") %>%
+  kableExtra::kable_classic(full_width = F, html_font = "Cambria", position = "left")
+
+
+```
+
+
+```{r analysis_3_death_table_sq3, echo=FALSE, warning=FALSE, message = FALSE}
+
+fmla.final <- as.formula(paste("Surv(",z.rv.time,",",z.rv,") ~   pspline(age_year)  + sex  + simd2020_sc_quintile +
+                               variant +  n_risk_gps + variant:vacc "))
+z.fit <- coxph(fmla.final , data=z.df.fit)
+z <- fun.extract(z.fit)
+kableExtra::kbl(z, 
+        caption = "Hazard Ratios for Death from Community Testing by Variant and vaccine type",
+        digits=c(0,2,2,2)) %>%
+     kableExtra::column_spec(1, width="15em") %>%
+  kableExtra::kable_classic(full_width = F, html_font = "Cambria", position = "left")
+
+
+```
+
+
+###Tested in NHS Lab
+
+```{r analysis_4_death_table, echo=FALSE, warning = FALSE, message = FALSE}
+
+z.df.fit <- z.df %>% filter(In_Hosp_At_Test==0 & lab=="nhs" & in_eave==1)
+
+z <- z.df.fit %>% group_by(vs) %>% dplyr::summarise(N=n(), Died=sum(covid_death))
+kableExtra::kbl(z, 
+        caption = "NHS Testing - not in hospital at test") %>%
+    kableExtra::kable_classic(full_width = F, html_font = "Cambria", position = "left")
+
+fmla.final <- as.formula(paste("Surv(",z.rv.time,",",z.rv,") ~   pspline(age_year) +pspline(days) + sex + simd2020_sc_quintile +  n_risk_gps +vs "))
+z.fit <- coxph(fmla.final , data=z.df.fit)
+drop1(z.fit, test="Chisq")
+
+z <- fun.extract(z.fit)
+kableExtra::kbl(z, 
+        caption = "Hazard Ratios for Covid Death Tested in NHS Lab",
+        digits=c(0,2,2,2)) %>%
+    kableExtra::column_spec(1, width="15em") %>% 
+    kableExtra::kable_classic(full_width = F, html_font = "Cambria", position = "left")
+
+```
+
+There are more deaths among those tested in NHS labs.  Vaccination is associated with a lower hazard of deaths.  Fully vaccinated with 2 doses 14+ days post second dose has a hazard ratio of `r fun_print_hr(z, "vsv2_14+")`.
+
+```{r analysis_4_variant_death_table, echo=FALSE, warning = FALSE, message = FALSE}
+
+z <- z.df.fit %>% group_by(variant) %>% dplyr::summarise(N=n(), Died=sum(covid_death))
+kableExtra::kbl(z, 
+        caption = "NHS Testing - not in hospital at test") %>%
+    kableExtra::kable_classic(full_width = F, html_font = "Cambria", position = "left")
+```
+
+Most individuals who tested positive in an NHS lab and whose virus was sequenced had the delta varaint.
+
+```{r analysis_4_variant_death_table_a, echo=FALSE, warning = FALSE, message = FALSE}
+
+z.df.fit <- z.df %>% filter(In_Hosp_At_Test==0 & lab=="nhs" & in_eave==1 &
+                              variant %in% c("alpha","delta"))
+
+
+fmla.final <- as.formula(paste("Surv(",z.rv.time,",",z.rv,") ~   pspline(age_year)  + sex + simd2020_sc_quintile + 
+                                +  n_risk_gps + variant + vs "))
+z.fit <- coxph(fmla.final , data=z.df.fit)
+
+z <- fun.extract(z.fit)
+kableExtra::kbl(z, 
+        caption = "Hazard Ratios for Covid Death Tested in NHS Lab among those sequenced",
+        digits=c(0,2,2,2)) %>%
+    kableExtra::column_spec(1, width="15em") %>% 
+    kableExtra::kable_classic(full_width = F, html_font = "Cambria", position = "left")
+```
+
+Among positive individuals tested in an NHS lab and whose virus sample was sequenced there is no evidence that the delta variant is associated with  an increased risk of death;  hazard ratio = `r fun_print_hr(z, "variantdelta")`.  These are conflicting results compared to all tested in the community and reflect the different patient populations tested in NHS labs - Healthcare workers with routine tests, care home residents, individuals coming to Accident and Emergency departments for respiratory conditions, individuals being tested prior to hospital admission.  There may also be unmeasured bias associated with the samples selected for sequencing.  The target was to sequence all viable samples but this has not been achieved.  As the selection of samples is carried out at the laboratories it is unlikely that there will be a bias associated with patient characteristics.
+
+
+```{r analysis_4_variant_death_table_b, echo=FALSE, warning = FALSE, message = FALSE}
+
+fmla.final <- as.formula(paste("Surv(",z.rv.time,",",z.rv,") ~   pspline(age_year)  + sex + simd2020_sc_quintile +
+                               variant +  n_risk_gps + variant:vacc "))
+z.fit <- coxph(fmla.final , data=z.df.fit)
+
+z <- fun.extract(z.fit)
+kableExtra::kbl(z, 
+        caption = "Hazard Ratios for Covid Death Tested in NHS Lab among those sequenced by vaccine type",
+        digits=c(0,2,2,2)) %>%
+    kableExtra::column_spec(1, width="15em") %>% 
+    kableExtra::kable_classic(full_width = F, html_font = "Cambria", position = "left")
+
+```
+
+Among positive individuals tested in an NHS lab and whose virus sample was sequenced there is no evidence of a differental effect of the vaccine if the variant is alpha or delta. For alpha the hazard ratio for 1 dose 28+ days or 2 doses is `r fun_print_hr(z, "variantalpha:vaccv1_28+v2")`.  The corresponding hazard ratio for delta is `r fun_print_hr(z, "variantdelta:vaccv1_28+v2")`
+
+
+
+###Tested in NHS Lab and in Hospital at the time of testing positive
+
+```{r analysis_5_death_table, echo=FALSE, warning=FALSE, message=FALSE}
+
+z.df.fit <- z.df %>% filter(In_Hosp_At_Test==1 & lab=="nhs" & in_eave==1)
+
+z <- z.df.fit %>% group_by(vs) %>% dplyr::summarise(N=n(), Died=sum(covid_death))
+kableExtra::kbl(z, 
+        caption = "NHS Testing - in hospital at test") %>%
+    kableExtra::kable_classic(full_width = F, html_font = "Cambria", position = "left")
+
+fmla.final <- as.formula(paste("Surv(",z.rv.time,",",z.rv,") ~   pspline(age_year) + sex + simd2020_sc_quintile +
+                               n_risk_gps +vs "))
+z.fit <- coxph(fmla.final , data=z.df.fit)
+
+z <- fun.extract(z.fit)
+kableExtra::kbl(z, 
+        caption = "Hazard Ratios for Covid Death Tested in NHS Lab and in hospital at time of test",
+        digits=c(0,2,2,2)) %>%
+    kableExtra::column_spec(1, width="15em") %>% 
+    kableExtra::kable_classic(full_width = F, html_font = "Cambria", position = "left")
+
+
+```
